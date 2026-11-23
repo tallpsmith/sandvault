@@ -6,7 +6,7 @@ SandVault (`sv`) manages a limited user account to sandbox shell commands and AI
 </br>
 </br>
 
-- **AI ready** - Includes Claude Code, OpenAI Codex, OpenCode, Google Gemini, pi, Muse Code, and the [herdr](https://herdr.dev) agent multiplexer
+- **AI ready** - Includes Claude Code, OpenAI Codex, OpenCode, Google Gemini, pi, Muse Code, the [herdr](https://herdr.dev) agent multiplexer, and an [Orca](https://orca.dev) remote server
 - **Web and iOS automation** - sandbox access to Chrome / Lightpanda and iOS Simulator
 - **Fast context switching** - No VM overhead; instant user switching
 - **Passwordless** - switch accounts without a prompt (after setup)
@@ -101,6 +101,10 @@ Install via git:
 # Run herdr (many agents, one terminal) in the sandbox
 # shortcut: sv hd
   sv herdr
+
+# Run an Orca remote server in the sandbox; pair from the Orca desktop app
+# shortcut: sv or
+  sv orca
 
 # Run command shell in the sandbox
 # shortcut: sv s
@@ -339,6 +343,26 @@ herdr runs a background server that **outlives the `sv` command**, and every pan
 - The starting directory and `-N` setting are also fixed when the server starts. Use `-- --session NAME` for a separate server.
 
 herdr can install state-reporting hooks into other agents (`herdr integration install claude`). This is not done automatically because it edits those agents' config files; run each agent once first so its config folder exists.
+
+
+## Running an Orca server in the sandbox
+
+[Orca](https://orca.dev) is a desktop app for running many coding agents in parallel git worktrees. Its [remote servers](https://orca.dev/docs/remote-servers) (beta) let the desktop app on your Mac drive a server somewhere else. `sv orca` runs that server inside the sandbox, so every terminal and agent you open from the Orca app runs as the sandbox user.
+
+```bash
+brew install --cask stablyai/orca/orca  # once; sv does not install Orca for you
+sv orca                                 # start the server and print a pairing link
+sv orca -- serve --port 7000            # arguments after -- go to the orca CLI
+```
+
+In the Orca desktop app, open Settings > Remote Orca Servers > Add Server, paste the `orca://pair?...` link, and turn on the option for reaching the server through an SSH tunnel: the link points at `127.0.0.1`, which is this Mac, and Orca otherwise rejects it as pointing back to the device you are on. Press `ctrl+c` in the `sv orca` terminal to stop the server.
+
+- The server listens on loopback only. The pairing link grants full control of the sandbox user, so exposing it is opt-in: `sv orca -- serve --bind <tailscale-ip> --pairing-address <tailscale-ip>`.
+- It runs Orca's Node server (`ORCA_SERVE_RUNTIME=orcad`) because the sandbox user has no desktop login. Without `--port` Orca uses 6768, or the next free port if another sandbox is using it.
+- `sv orca` uses the `Orca.app` already on your Mac (`/Applications`, or `SV_ORCA_APP`), and prints install instructions if it is missing.
+- As with herdr, the server's terminals outlive the `sv` command, so `--no-sandbox`, `--browser` and `--ios` are refused.
+- Orca adds its state-reporting hooks to the sandbox user's `~/.claude`, `~/.codex`, `~/.gemini` and `~/.config/muse` settings, merging with what is there. They do nothing outside Orca terminals.
+- Agent logins are separate from your Mac's: run `sv claude` (or `orca account add --agent claude` in an Orca terminal) once to sign in.
 
 
 ## Nested sandboxes
@@ -610,6 +634,7 @@ After exploring Docker containers, Podman, sandbox-exec, and virtualization, I n
 - Runs pi with `--approve` to trust project-local files (pi needs no permission bypass)
 - Runs Muse Code with `--yolo`, which disables both its approval prompts and its own sandbox — sandvault is already the sandbox, and muse's nested one defaults to proxy-only network and workspace-only writes
 - Runs herdr unmodified (it is a multiplexer, not an agent) and refuses to run it without the sandbox or with `--browser` / `--ios`, because its server outlives the session
+- Runs `orca` as a loopback-only remote server (`orca serve --bind 127.0.0.1`), with the same refusals as herdr; the sandbox profile allows writes to Orca's port-scan lock directory (`/private/var/tmp/orca-port-scan-<uid>`) and nothing else under `/private/var/tmp`
 - Automates Chrome for web testing (via Chrome DevTools Protocol)
 - Automated iOS Simulator for app testing (via `xcrun simctl`, and `iosef`)
 - Maintains a clean separation between trusted and untrusted code

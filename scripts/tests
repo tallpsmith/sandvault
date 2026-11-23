@@ -1337,6 +1337,22 @@ STUB
     }
     queue_test test_help_lists_herdr
 
+    # Orca hardcodes /private/var/tmp/orca-port-scan-<uid> for its port-scanner
+    # locks; the sandbox profile must allow exactly that directory, not all of
+    # /private/var/tmp.
+    test_profile_allows_orca_port_scan_dir() {
+        # shellcheck disable=SC2016 # single quotes intentional: matching a literal $SANDVAULT_PROFILE_UID
+        if grep -Fq '(subpath "/private/var/tmp/orca-port-scan-$SANDVAULT_PROFILE_UID")' "$SV_BASE" \
+            && ! grep -Eq '^[[:space:]]+\(subpath "/(private/)?var/tmp"\)' "$SV_BASE"; then
+            pass "sandbox profile allows only the orca-port-scan dir under /private/var/tmp"
+        else
+            fail "sandbox profile allows only the orca-port-scan dir under /private/var/tmp" \
+                "a per-uid orca-port-scan subpath rule and no blanket /var/tmp rule" \
+                "missing rule or blanket /var/tmp write in $SV_BASE"
+        fi
+    }
+    queue_test test_profile_allows_orca_port_scan_dir
+
     test_sv_dispatches_herdr() {
         if grep -Eq '^[[:space:]]+hd[|]herdr\)' "$SV_BASE" \
             && grep -A2 -E '^[[:space:]]+hd[|]herdr\)' "$SV_BASE" | grep -q 'COMMAND=herdr'; then
@@ -1458,6 +1474,180 @@ STUB
         fi
     }
     queue_test test_herdr_wrapper_refuses_no_sandbox
+
+    ###########################################################################
+    # orca: runs an Orca remote server in the sandbox (pair from the desktop app)
+    ###########################################################################
+    test_help_lists_orca() {
+        local output
+        output=$("$SV_BASE" --help 2>&1 || true)
+        if [[ "$output" == *"or, orca"* ]]; then
+            pass "--help lists orca"
+        else
+            fail "--help lists orca" "orca command line" "$output"
+        fi
+    }
+    queue_test test_help_lists_orca
+
+    test_sv_dispatches_orca() {
+        if grep -Eq '^[[:space:]]+or[|]orca\)' "$SV_BASE" \
+            && grep -A2 -E '^[[:space:]]+or[|]orca\)' "$SV_BASE" | grep -q 'COMMAND=orca'; then
+            pass "sv dispatches or|orca -> COMMAND=orca"
+        else
+            fail "sv dispatches or|orca -> COMMAND=orca" \
+                "an or|orca) case arm setting COMMAND=orca" \
+                "missing or broken case arm in $SV_BASE"
+        fi
+    }
+    queue_test test_sv_dispatches_orca
+
+    # Orca.app is a large Electron app that is installed on the host, not by sv.
+    test_sv_does_not_install_orca() {
+        if grep -Eq 'ensure_brew_tool[^#]*orca|brew (install|reinstall)[^#]*orca' "$SV_BASE"; then
+            fail "sv does not install orca" "no brew install of orca in sv" "found in $SV_BASE"
+        else
+            pass "sv does not install orca"
+        fi
+    }
+    queue_test test_sv_does_not_install_orca
+
+    # Build a fake Orca.app whose CLI records its arguments and environment, so
+    # the wrapper's behaviour can be checked without Orca installed.
+    make_fake_orca_app() {
+        local dir=$1
+        mkdir -p "$dir/Orca.app/Contents/Resources/bin"
+        cat > "$dir/Orca.app/Contents/Resources/bin/orca" << 'FAKE'
+#!/bin/bash
+echo "runtime=${ORCA_SERVE_RUNTIME:-unset}"
+for a in "$@"; do echo "arg=$a"; done
+FAKE
+        chmod +x "$dir/Orca.app/Contents/Resources/bin/orca"
+    }
+
+    test_orca_wrapper_default_serve() {
+        local wrapper="$SCRIPT_DIR/../guest/home/bin/orca" tmp out
+        tmp=$(mktemp -d)
+        make_fake_orca_app "$tmp"
+        out=$(SV_ORCA_APP="$tmp/Orca.app" "$wrapper" 2>/dev/null)
+        rm -rf "$tmp"
+        local want=$'runtime=orcad\narg=serve\narg=--bind\narg=127.0.0.1'
+        if [[ "$out" == "$want" ]]; then
+            pass "orca wrapper defaults to 'serve --bind 127.0.0.1' on the orcad runtime"
+        else
+            fail "orca wrapper defaults to 'serve --bind 127.0.0.1' on the orcad runtime" "$want" "$out"
+        fi
+    }
+    queue_test test_orca_wrapper_default_serve
+
+    test_orca_wrapper_explicit_bind() {
+        local wrapper="$SCRIPT_DIR/../guest/home/bin/orca" tmp out
+        tmp=$(mktemp -d)
+        make_fake_orca_app "$tmp"
+        out=$(SV_ORCA_APP="$tmp/Orca.app" "$wrapper" serve --bind 100.64.1.20 --port 7000 2>/dev/null)
+        rm -rf "$tmp"
+        local want=$'runtime=orcad\narg=serve\narg=--bind\narg=100.64.1.20\narg=--port\narg=7000'
+        if [[ "$out" == "$want" ]]; then
+            pass "orca wrapper keeps an explicit --bind and port"
+        else
+            fail "orca wrapper keeps an explicit --bind and port" "$want" "$out"
+        fi
+    }
+    queue_test test_orca_wrapper_explicit_bind
+
+    # Other subcommands (orca environment, orca status, ... as called by agents
+    # in Orca terminals) must not gain flags, or stdout noise.
+    test_orca_wrapper_passthrough() {
+        local wrapper="$SCRIPT_DIR/../guest/home/bin/orca" tmp out err
+        tmp=$(mktemp -d)
+        make_fake_orca_app "$tmp"
+        out=$(SV_ORCA_APP="$tmp/Orca.app" "$wrapper" environment list --json 2>"$tmp/err")
+        err=$(cat "$tmp/err")
+        rm -rf "$tmp"
+        local want=$'runtime=unset\narg=environment\narg=list\narg=--json'
+        if [[ "$out" != "$want" ]]; then
+            fail "orca wrapper passes other subcommands through untouched" "$want" "$out"
+        elif [[ -n "$err" ]]; then
+            fail "orca wrapper passes other subcommands through untouched" "no stderr output" "$err"
+        else
+            pass "orca wrapper passes other subcommands through untouched"
+        fi
+    }
+    queue_test test_orca_wrapper_passthrough
+
+    # `serve --json` is machine-readable: no pairing instructions on stderr.
+    test_orca_wrapper_serve_json_is_quiet() {
+        local wrapper="$SCRIPT_DIR/../guest/home/bin/orca" tmp err
+        tmp=$(mktemp -d)
+        make_fake_orca_app "$tmp"
+        err=$(SV_ORCA_APP="$tmp/Orca.app" "$wrapper" serve --json 2>&1 >/dev/null)
+        rm -rf "$tmp"
+        if [[ -z "$err" ]]; then
+            pass "orca wrapper prints no pairing help for serve --json"
+        else
+            fail "orca wrapper prints no pairing help for serve --json" "no stderr output" "$err"
+        fi
+    }
+    queue_test test_orca_wrapper_serve_json_is_quiet
+
+    # ~/bin (this wrapper) is first on PATH, so command -v orca would find the
+    # wrapper again and exec itself forever.
+    test_orca_wrapper_no_command_v() {
+        local code
+        code=$(grep -vE '^[[:space:]]*#' "$SCRIPT_DIR/../guest/home/bin/orca" | sed 's/[[:space:]]#.*$//')
+        # shellcheck disable=SC2016 # single quotes intentional: matching literal "$ORCA"
+        if grep -q 'command -v orca' <<< "$code" || ! grep -Eq '^exec "\$ORCA" "\$@"$' <<< "$code"; then
+            fail "orca wrapper finds the CLI by explicit path" \
+                'explicit-path lookup and exec "$ORCA" "$@", not command -v orca' "$SCRIPT_DIR/../guest/home/bin/orca"
+        else
+            pass "orca wrapper finds the CLI by explicit path"
+        fi
+    }
+    queue_test test_orca_wrapper_no_command_v
+
+    test_orca_wrapper_reports_missing_app() {
+        local output status=0
+        output=$(SV_ORCA_APP="/nonexistent/Orca.app" HOME="/nonexistent" "$SCRIPT_DIR/../guest/home/bin/orca" 2>&1) || status=$?
+        if [[ "$status" -ne 0 && "$output" == *"Orca is not installed"* && "$output" == *"brew install --cask stablyai/orca/orca"* ]]; then
+            pass "orca wrapper reports a missing Orca.app"
+        else
+            fail "orca wrapper reports a missing Orca.app" \
+                "non-zero exit with install instructions" "exit $status: $output"
+        fi
+    }
+    queue_test test_orca_wrapper_reports_missing_app
+
+    test_orca_wrapper_refuses_no_sandbox() {
+        local output status=0
+        output=$(SV_NO_SANDBOX=true "$SCRIPT_DIR/../guest/home/bin/orca" 2>&1) || status=$?
+        if [[ "$status" -ne 0 && "$output" == *"cannot run without the sandbox"* ]]; then
+            pass "orca wrapper refuses SV_NO_SANDBOX=true"
+        else
+            fail "orca wrapper refuses SV_NO_SANDBOX=true" \
+                "non-zero exit and 'cannot run without the sandbox'" "exit $status: $output"
+        fi
+    }
+    queue_test test_orca_wrapper_refuses_no_sandbox
+
+    # The orca server outlives sv and its terminals inherit the first session's
+    # sandbox and environment, exactly as with herdr.
+    test_orca_refuses_unsafe_flags() {
+        local flag output status got=""
+        for flag in -x -b -i -I; do
+            status=0
+            # shellcheck disable=SC2310 # failure is captured in status, not fatal
+            output=$(sv_cmd "$flag" or 2>&1) || status=$?
+            if [[ "$status" -eq 0 || "$(tail -n1 <<< "$output")" != *"orca cannot run with"* ]]; then
+                got+="[$flag] exit $status: $output"$'\n'
+            fi
+        done
+        if [[ -z "$got" ]]; then
+            pass "orca refuses -x, --browser, --ios"
+        else
+            fail "orca refuses -x, --browser, --ios" \
+                "exit 1 with 'orca cannot run with' as the last line" "$got"
+        fi
+    }
+    queue_test test_orca_refuses_unsafe_flags
 
     # The wrapper's refusal is only as good as SV_NO_SANDBOX: sv must set it for
     # -x. Nested sessions never apply sandbox-exec themselves, so they always

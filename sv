@@ -489,7 +489,9 @@ install_deps () {
                 ensure_brew_tool "herdr" "herdr"
                 ;;
             *)
-                # No tool installation needed for other commands
+                # No tool installation needed for other commands. (orca is
+                # deliberately not installed here: it is the Orca.app cask,
+                # and the guest wrapper reports how to install it if missing.)
                 ;;
         esac
     fi
@@ -1065,13 +1067,14 @@ show_help() {
     echo "  p,  pi     [PATH]    Open pi in sandvault"
     echo "  m,  muse   [PATH]    Open Muse Code in sandvault"
     echo "  hd, herdr  [PATH]    Open herdr agent multiplexer in sandvault"
+    echo "  or, orca   [PATH]    Run an Orca remote server in sandvault (pair from the Orca app)"
     echo "  s, shell   [PATH]    Open shell in sandvault"
     echo "  b, build             Build sandvault"
     echo "  profiles [list]      List sandboxes owned by this user"
     echo "  u, uninstall         Remove sandvault (current profile); keep shared files"
     echo "  uninstall --all      Remove all owned sandboxes and sweep orphan files"
     echo ""
-    echo "Arguments after -- are passed to the command (claude, codex, opencode, gemini, pi, muse, herdr, shell)"
+    echo "Arguments after -- are passed to the command (claude, codex, opencode, gemini, pi, muse, herdr, orca, shell)"
     echo ""
     echo "Environment:"
     echo "  SV_PROFILE           Default profile name (--profile flag overrides)"
@@ -1217,6 +1220,10 @@ case "${1:-}" in
         COMMAND=herdr
         INITIAL_DIR="${2:-}"
         ;;
+    or|orca)
+        COMMAND=orca
+        INITIAL_DIR="${2:-}"
+        ;;
     s|shell)
         COMMAND=
         INITIAL_DIR="${2:-}"
@@ -1308,25 +1315,26 @@ readonly REBUILD
 readonly USE_SANDBOX
 readonly FIX_PERMISSIONS
 
-# herdr runs a background server that outlives this sv invocation, and every
-# pane is a child of that server, so panes keep the sandbox and environment of
-# the session that first started it -- not of the session that later attaches.
-if [[ "$COMMAND" == "herdr" ]]; then
-    # The guest herdr wrapper refuses to start under SV_NO_SANDBOX, which
-    # covers launching herdr from inside an unsandboxed 'sv -x shell'.
+# herdr and orca run a server that outlives this sv invocation, and every
+# pane/terminal is a child of that server, so they keep the sandbox and
+# environment of the session that first started it -- not of the session that
+# later attaches or pairs.
+if [[ "$COMMAND" == "herdr" || "$COMMAND" == "orca" ]]; then
+    # The guest wrappers refuse to start under SV_NO_SANDBOX, which covers
+    # launching them from inside an unsandboxed 'sv -x shell'.
     if [[ "$USE_SANDBOX" == "false" ]]; then
         # An unsandboxed first launch would leave every later pane unsandboxed,
         # even when reattached with a plain (sandboxed) 'sv herdr'.
-        abort "herdr cannot run with --no-sandbox: its server outlives this session, so every pane it starts, now or after a later reattach, would be unsandboxed. Use 'sv shell' if you need an unsandboxed shell."
+        abort "$COMMAND cannot run with --no-sandbox: its server outlives this session, so every pane it starts, now or after a later reattach, would be unsandboxed. Use 'sv shell' if you need an unsandboxed shell."
     fi
 
-    # herdr server's panes would keep the endpoint after the chrome-browser/ios-simulator is
+    # The server's panes would keep the endpoint after the chrome-browser/ios-simulator is
     # stopped on detach, including panes opened by later sessions.
     if [[ "$USE_BROWSER" == "true" ]]; then
-        abort "herdr cannot run with --browser: the herdr server outlives this session, so its panes would keep a stale SV_BROWSER_ENDPOINT after the browser stops. Run 'sv --browser claude' (or another agent) in its own window instead."
+        abort "$COMMAND cannot run with --browser: the $COMMAND server outlives this session, so its panes would keep a stale SV_BROWSER_ENDPOINT after the browser stops. Run 'sv --browser claude' (or another agent) in its own window instead."
     fi
     if [[ "$USE_IOS_SIMULATOR" == "true" ]]; then
-        abort "herdr cannot run with --ios: the herdr server outlives this session, so its panes would keep a stale SV_IOS_SIMULATOR_ENDPOINT after the simulator stops. Run 'sv --ios claude' (or another agent) in its own window instead."
+        abort "$COMMAND cannot run with --ios: the $COMMAND server outlives this session, so its panes would keep a stale SV_IOS_SIMULATOR_ENDPOINT after the simulator stops. Run 'sv --ios claude' (or another agent) in its own window instead."
     fi
 fi
 
@@ -1736,6 +1744,8 @@ else
         #
         # The profile file is owned by root so sandvault user cannot modify it.
         debug "Creating sandbox profile..."
+        SANDVAULT_PROFILE_UID=$(dscl . -read "/Users/$SANDVAULT_USER" UniqueID 2>/dev/null | awk '{print $2}')
+        [[ "$SANDVAULT_PROFILE_UID" =~ ^[0-9]+$ ]] || abort "Cannot determine UID of $SANDVAULT_USER"
 heredoc SANDBOX_PROFILE_CONTENT << EOF
 ;; Sandbox profile for sandvault
 (version 1)
@@ -1814,6 +1824,12 @@ heredoc SANDBOX_PROFILE_CONTENT << EOF
     (subpath "/var/folders")
     (subpath "/private/var/folders")
     (subpath "/dev"))
+
+;; Orca (sv orca) hardcodes /private/var/tmp/orca-port-scan-<uid> for its
+;; workspace port scanner lock files, ignoring TMPDIR. Allow only that one
+;; per-user directory, not the shared /private/var/tmp.
+(allow file-write*
+    (subpath "/private/var/tmp/orca-port-scan-$SANDVAULT_PROFILE_UID"))
 
 ;; allow basic process info queries
 (allow process-info*)

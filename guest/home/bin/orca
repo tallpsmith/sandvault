@@ -1,0 +1,79 @@
+#!/bin/bash
+set -Eeuo pipefail
+trap 'echo >&2 "${BASH_SOURCE[0]}: line $LINENO: $BASH_COMMAND: exitcode $?"' ERR
+
+# Runs an Orca (https://orca.dev) remote server inside the sandbox, so that the
+# Orca desktop app on the host can pair with it ("Remote Orca Servers"). Every
+# terminal and agent the paired client opens runs as the sandbox user.
+#
+# sv does not install Orca: it is a large Electron app that is installed on the
+# host (brew install --cask stablyai/orca/orca) and the sandbox user runs that
+# copy. Set SV_ORCA_APP to the Orca.app path to use a copy somewhere else
+# (it is then the only place looked at).
+
+# sv sets SV_NO_SANDBOX when sandbox-exec is off (sv -x). Terminals owned by
+# the Orca server survive restarts of the server and later sessions pair with
+# it, so an unsandboxed server would run their terminals unsandboxed too.
+if [[ "${SV_NO_SANDBOX:-}" == "true" ]]; then
+    echo >&2 "ERROR: orca cannot run without the sandbox (sv -x): its server outlives this session, so terminals started later, by any paired client, would be unsandboxed."
+    exit 1
+fi
+
+# Find the real CLI by explicit path only. ~/bin (this wrapper) is first on
+# PATH, so `command -v orca` would find this script again and exec itself
+# forever.
+ORCA=""
+candidates=("/Applications/Orca.app" "$HOME/Applications/Orca.app")
+if [[ -n "${SV_ORCA_APP:-}" ]]; then
+    candidates=("$SV_ORCA_APP")    # an explicit override is the only candidate
+fi
+for app in "${candidates[@]}"; do
+    if [[ -x "$app/Contents/Resources/bin/orca" ]]; then
+        ORCA="$app/Contents/Resources/bin/orca"
+        break
+    fi
+done
+if [[ -z "$ORCA" ]]; then
+    echo >&2 "ERROR: Orca is not installed. Install it on the host, then run this again:"
+    echo >&2 "  brew install --cask stablyai/orca/orca"
+    echo >&2 "(or download it from https://orca.dev; set SV_ORCA_APP if it is not in /Applications)"
+    exit 1
+fi
+
+# With no arguments, start the remote server. Anything else is passed through
+# untouched, so `orca environment ...`, `orca status` and the CLI that Orca
+# agents call inside their terminals keep working, and nothing may be written
+# to stdout here.
+if [[ $# -eq 0 ]]; then
+    set -- serve
+fi
+
+if [[ "$1" == "serve" ]]; then
+    # The default (Electron) runtime needs a desktop login; the sandbox user has
+    # none. The orcad runtime is the same server as plain Node.
+    export ORCA_SERVE_RUNTIME="${ORCA_SERVE_RUNTIME:-orcad}"
+
+    # Listen on loopback unless the caller chose an address. The pairing link is
+    # a credential that gives full control of this sandbox user, so exposing it
+    # to the network is opt-in (sv orca -- serve --bind <tailscale-ip> ...).
+    has_bind=false
+    has_json=false
+    for arg in "$@"; do
+        case "$arg" in
+            --bind|--bind=*) has_bind=true ;;
+            --json) has_json=true ;;
+            *) ;;
+        esac
+    done
+    if [[ "$has_bind" == "false" ]]; then
+        set -- "$@" --bind 127.0.0.1
+    fi
+    if [[ "$has_json" == "false" ]]; then
+        echo >&2 "Starting the Orca server (loopback only, runs until you press ctrl+c)."
+        echo >&2 "Pair from the Orca desktop app: Settings > Remote Orca Servers > Add Server,"
+        echo >&2 "paste the pairing link below, and turn on the option for reaching the server"
+        echo >&2 "through an SSH tunnel (the link points at 127.0.0.1, which is this Mac)."
+    fi
+fi
+
+exec "$ORCA" "$@"

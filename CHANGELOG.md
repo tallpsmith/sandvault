@@ -2,6 +2,12 @@
 
 All notable user-facing changes to SandVault are documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- Add `sv orca` (alias `sv or`) to run an [Orca](https://orca.dev) remote server inside the sandbox, so the Orca desktop app on your Mac can pair with it and run its terminals and agents as the sandbox user. The server listens on loopback only, uses the `Orca.app` you already have installed (sv does not install it), and, like herdr, refuses `--no-sandbox`, `--browser` and `--ios`. The sandbox profile now allows writes to Orca's port-scan lock directory under `/private/var/tmp`, and nothing else there; run `sv --rebuild` once to pick it up
+
 ## [1.40.0] - 2026-11-23
 
 ### Added
